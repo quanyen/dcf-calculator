@@ -1,492 +1,516 @@
-import React, { useState, useEffect, useMemo } from 'react';
-import { 
-  Calculator, 
-  TrendingUp, 
-  Activity, 
-  AlertCircle, 
-  DollarSign, 
-  Percent, 
-  ArrowRight,
-  RefreshCw,
-  Info
-} from 'lucide-react';
-
-// --- Helper Functions ---
-
-/**
- * Calculates the Intrinsic Value per share based on DCF inputs.
- */
-const calculateDCF = (inputs) => {
-  const {
-    fcf,
-    growthRate1to5,
-    growthRate6to10,
-    wacc,
-    terminalGrowth,
-    sharesOutstanding,
-    netDebt, // Positive for Net Debt (Debt - Cash)
-  } = inputs;
-
-  const waccDecimal = wacc / 100;
-  const termGrowthDecimal = terminalGrowth / 100;
-  const g1Decimal = growthRate1to5 / 100;
-  const g2Decimal = growthRate6to10 / 100;
-
-  let projectedFCF = [];
-  let sumPV = 0;
-  let currentFCF = fcf;
-
-  // Years 1-5
-  for (let i = 1; i <= 5; i++) {
-    currentFCF = currentFCF * (1 + g1Decimal);
-    const discountFactor = Math.pow(1 + waccDecimal, i);
-    const pv = currentFCF / discountFactor;
-    projectedFCF.push({ year: i, fcf: currentFCF, pv });
-    sumPV += pv;
-  }
-
-  // Years 6-10
-  for (let i = 6; i <= 10; i++) {
-    currentFCF = currentFCF * (1 + g2Decimal);
-    const discountFactor = Math.pow(1 + waccDecimal, i);
-    const pv = currentFCF / discountFactor;
-    projectedFCF.push({ year: i, fcf: currentFCF, pv });
-    sumPV += pv;
-  }
-
-  // Terminal Value (Gordon Growth Model)
-  // TV = (Final FCF * (1 + g_term)) / (WACC - g_term)
-  const finalFCF = projectedFCF[9].fcf;
-  
-  // Guard against WACC <= Terminal Growth to prevent divide by zero or negative TV
-  let terminalValue = 0;
-  if (waccDecimal > termGrowthDecimal) {
-    terminalValue = (finalFCF * (1 + termGrowthDecimal)) / (waccDecimal - termGrowthDecimal);
-  }
-
-  const terminalValuePV = terminalValue / Math.pow(1 + waccDecimal, 10);
-  
-  const enterpriseValue = sumPV + terminalValuePV;
-  const equityValue = enterpriseValue - netDebt;
-  const sharePrice = equityValue / sharesOutstanding;
-
-  return {
-    sharePrice,
-    equityValue,
-    enterpriseValue,
-    terminalValuePV,
-    sumPV,
-    projectedFCF
-  };
-};
-
-/**
- * Reverse DCF Solver: Finds the Implied Growth Rate (1-5y) for a given stock price.
- * Assumes 6-10y growth scales proportionally or matches (simplified for solver).
- * Uses Binary Search.
- */
-const solveReverseDCF = (targetPrice, inputs) => {
-  let low = -0.50; // -50%
-  let high = 1.00; // 100%
-  let tolerance = 0.01;
-  let iterations = 0;
-  let impliedRate = 0;
-
-  while (iterations < 50) {
-    const mid = (low + high) / 2;
-    // We adjust both growth phases for the reverse calc to keep it simple, 
-    // or we could just solve for the first phase. Let's solve for 1-5y 
-    // and assume 6-10y decays to half of that or stays same. 
-    // For this tool, let's assume we are solving for a "Compound Annual Growth Rate" across the period.
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stock Valuation Dashboard</title>
     
-    const testInputs = {
-      ...inputs,
-      growthRate1to5: mid * 100,
-      growthRate6to10: (mid * 100) * 0.75 // Assumption: growth slows slightly in 2nd phase
-    };
-
-    const result = calculateDCF(testInputs);
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
     
-    if (Math.abs(result.sharePrice - targetPrice) < tolerance) {
-      impliedRate = mid * 100;
-      break;
-    }
+    <!-- React & ReactDOM -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+    
+    <!-- Babel for JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <!-- Custom Font (Optional but recommended for Tailwind default) -->
+    <style>
+        body { font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+    </style>
+</head>
+<body class="bg-slate-100 text-slate-800">
+    <div id="root"></div>
 
-    if (result.sharePrice < targetPrice) {
-      low = mid;
-    } else {
-      high = mid;
-    }
-    impliedRate = mid * 100;
-    iterations++;
-  }
-  return impliedRate;
-};
+    <script type="text/babel">
+        const { useState, useEffect, useMemo } = React;
 
-// --- Components ---
+        // --- Icons (Recreating Lucide Icons as React Components) ---
+        const Icon = ({ children, size = 24, className = "" }) => (
+            <svg 
+                xmlns="http://www.w3.org/2000/svg" 
+                width={size} 
+                height={size} 
+                viewBox="0 0 24 24" 
+                fill="none" 
+                stroke="currentColor" 
+                strokeWidth="2" 
+                strokeLinecap="round" 
+                strokeLinejoin="round" 
+                className={className}
+            >
+                {children}
+            </svg>
+        );
 
-const InputField = ({ label, value, onChange, unit = '', step = '0.1', type = 'number', tooltip }) => (
-  <div className="mb-4">
-    <div className="flex justify-between items-end mb-1 min-h-[2rem]">
-      <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider flex items-center gap-1 pb-0.5">
-        {label}
-        {tooltip && (
-          <div className="group relative">
-            <Info size={12} className="text-slate-400 cursor-help" />
-            <div className="absolute left-0 bottom-full mb-2 hidden group-hover:block w-48 p-2 bg-slate-800 text-slate-100 text-xs rounded shadow-lg z-10">
-              {tooltip}
-            </div>
-          </div>
-        )}
-      </label>
-      <span className="text-xs font-medium text-slate-400 pb-0.5">{unit}</span>
-    </div>
-    <div className="relative">
-      <input
-        type={type}
-        step={step}
-        value={value}
-        onChange={(e) => onChange(parseFloat(e.target.value) || 0)}
-        className="w-full bg-slate-50 border border-slate-200 text-slate-800 rounded px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all font-mono text-right"
-      />
-    </div>
-  </div>
-);
+        const Activity = (props) => <Icon {...props}><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></Icon>;
+        const Calculator = (props) => <Icon {...props}><rect width="16" height="20" x="4" y="2" rx="2"/><line x1="8" x2="16" y1="6" y2="6"/><line x1="16" x2="16" y1="14" y2="18"/><path d="M16 10h.01"/><path d="M12 10h.01"/><path d="M8 10h.01"/><path d="M12 14h.01"/><path d="M8 14h.01"/><path d="M12 18h.01"/><path d="M8 18h.01"/></Icon>;
+        const TrendingUp = (props) => <Icon {...props}><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/></Icon>;
+        const RefreshCw = (props) => <Icon {...props}><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M3 21v-5h5"/></Icon>;
+        const Info = (props) => <Icon {...props}><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></Icon>;
 
-const SensitivityTable = ({ baseInputs, basePrice }) => {
-  const waccSteps = [-1, -0.5, 0, 0.5, 1]; // deviations from base WACC
-  const growthSteps = [-0.5, 0, 0.5]; // deviations from terminal growth
+        // --- Logic & Helper Functions ---
 
-  return (
-    <div className="overflow-x-auto">
-      <table className="w-full text-sm text-center border-collapse">
-        <thead>
-          <tr>
-            <th className="p-2 bg-slate-50 border border-slate-200 text-slate-400 text-xs font-normal">
-              WACC (X) <br/> Term. G (Y)
-            </th>
-            {waccSteps.map((step) => (
-              <th key={step} className="p-2 bg-slate-50 border border-slate-200 text-slate-600 font-medium">
-                {(baseInputs.wacc + step).toFixed(1)}%
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {growthSteps.map((gStep) => (
-            <tr key={gStep}>
-              <td className="p-2 bg-slate-50 border border-slate-200 text-slate-600 font-medium">
-                {(baseInputs.terminalGrowth + gStep).toFixed(1)}%
-              </td>
-              {waccSteps.map((wStep) => {
-                const inputs = {
-                  ...baseInputs,
-                  wacc: baseInputs.wacc + wStep,
-                  terminalGrowth: baseInputs.terminalGrowth + gStep
-                };
-                const { sharePrice } = calculateDCF(inputs);
-                
-                // Color coding
-                const diff = (sharePrice - basePrice) / basePrice;
-                let bgClass = "bg-white";
-                if (sharePrice > basePrice * 1.1) bgClass = "bg-green-50 text-green-700";
-                else if (sharePrice < basePrice * 0.9) bgClass = "bg-red-50 text-red-700";
+        const calculateDCF = (inputs) => {
+            const {
+                fcf,
+                growthRate1to5,
+                growthRate6to10,
+                wacc,
+                terminalGrowth,
+                sharesOutstanding,
+                netDebt, 
+            } = inputs;
 
-                return (
-                  <td key={wStep} className={`p-2 border border-slate-200 font-mono ${bgClass}`}>
-                    ${sharePrice.toFixed(2)}
-                  </td>
-                );
-              })}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-};
+            const waccDecimal = wacc / 100;
+            const termGrowthDecimal = terminalGrowth / 100;
+            const g1Decimal = growthRate1to5 / 100;
+            const g2Decimal = growthRate6to10 / 100;
 
-export default function App() {
-  const [activeTab, setActiveTab] = useState('dcf');
-  
-  // Inputs State
-  const [ticker, setTicker] = useState('AAPL');
-  const [currentPrice, setCurrentPrice] = useState(220.00);
-  
-  const [inputs, setInputs] = useState({
-    fcf: 100000, // in millions usually, but raw numbers work
-    growthRate1to5: 12.0,
-    growthRate6to10: 6.0,
-    wacc: 9.0,
-    terminalGrowth: 3.0,
-    sharesOutstanding: 15500,
-    netDebt: 50000,
-  });
+            let projectedFCF = [];
+            let sumPV = 0;
+            let currentFCF = fcf;
 
-  // Derived State: DCF Calculation
-  const result = useMemo(() => calculateDCF(inputs), [inputs]);
-  const upside = ((result.sharePrice - currentPrice) / currentPrice) * 100;
+            // Years 1-5
+            for (let i = 1; i <= 5; i++) {
+                currentFCF = currentFCF * (1 + g1Decimal);
+                const discountFactor = Math.pow(1 + waccDecimal, i);
+                const pv = currentFCF / discountFactor;
+                projectedFCF.push({ year: i, fcf: currentFCF, pv });
+                sumPV += pv;
+            }
 
-  // Derived State: Reverse DCF
-  const impliedGrowth = useMemo(() => solveReverseDCF(currentPrice, inputs), [currentPrice, inputs]);
+            // Years 6-10
+            for (let i = 6; i <= 10; i++) {
+                currentFCF = currentFCF * (1 + g2Decimal);
+                const discountFactor = Math.pow(1 + waccDecimal, i);
+                const pv = currentFCF / discountFactor;
+                projectedFCF.push({ year: i, fcf: currentFCF, pv });
+                sumPV += pv;
+            }
 
-  const updateInput = (key, value) => {
-    setInputs(prev => ({ ...prev, [key]: value }));
-  };
+            // Terminal Value
+            const finalFCF = projectedFCF[9].fcf;
+            let terminalValue = 0;
+            if (waccDecimal > termGrowthDecimal) {
+                terminalValue = (finalFCF * (1 + termGrowthDecimal)) / (waccDecimal - termGrowthDecimal);
+            }
 
-  return (
-    <div className="min-h-screen bg-slate-100 text-slate-800 font-sans p-4 md:p-8">
-      <div className="max-w-6xl mx-auto">
-        
-        {/* Header */}
-        <header className="flex flex-col md:flex-row justify-between items-start md:items-center mb-8 gap-4">
-          <div>
-            <h1 className="text-3xl font-bold text-slate-900 tracking-tight flex items-center gap-2">
-              <Activity className="text-blue-600" />
-              Valuation Lab
-            </h1>
-            <p className="text-slate-500 text-sm mt-1">Advanced DCF & Reverse DCF Modeling</p>
-          </div>
-          <div className="flex items-center gap-4 bg-white p-2 rounded-lg shadow-sm border border-slate-200">
-            <div className="px-3">
-              <label className="text-xs text-slate-400 block font-bold">TICKER</label>
-              <input 
-                value={ticker} 
-                onChange={(e) => setTicker(e.target.value.toUpperCase())}
-                className="font-bold text-slate-800 w-16 outline-none bg-transparent"
-              />
-            </div>
-            <div className="h-8 w-px bg-slate-200"></div>
-            <div className="px-3">
-              <label className="text-xs text-slate-400 block font-bold">CURRENT PRICE</label>
-              <div className="flex items-center gap-1">
-                <span className="text-slate-400">$</span>
-                <input 
-                  type="number" 
-                  value={currentPrice} 
-                  onChange={(e) => setCurrentPrice(parseFloat(e.target.value))}
-                  className="font-bold text-slate-800 w-20 outline-none bg-transparent"
-                />
-              </div>
-            </div>
-          </div>
-        </header>
-
-        {/* Main Grid */}
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-          
-          {/* LEFT COLUMN: Inputs */}
-          <div className="lg:col-span-4 space-y-6">
-            <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6">
-              <h2 className="text-lg font-bold text-slate-800 mb-4 flex items-center gap-2">
-                <Calculator size={18} />
-                Model Assumptions
-              </h2>
-              
-              <div className="space-y-1">
-                <InputField 
-                  label="Free Cash Flow (TTM)" 
-                  value={inputs.fcf} 
-                  onChange={(v) => updateInput('fcf', v)} 
-                  tooltip="Total free cash flow generated in the last 12 months. Base for projection."
-                />
-                
-                <div className="grid grid-cols-2 gap-4">
-                  <InputField 
-                    label="Growth Rate (Y 1-5)" 
-                    value={inputs.growthRate1to5} 
-                    onChange={(v) => updateInput('growthRate1to5', v)} 
-                    unit="%" 
-                  />
-                  <InputField 
-                    label="Growth Rate (Y 6-10)" 
-                    value={inputs.growthRate6to10} 
-                    onChange={(v) => updateInput('growthRate6to10', v)} 
-                    unit="%" 
-                  />
-                </div>
-
-                <div className="p-4 bg-slate-50 rounded-lg border border-slate-100 mb-4">
-                  <InputField 
-                    label="Discount Rate (WACC)" 
-                    value={inputs.wacc} 
-                    onChange={(v) => updateInput('wacc', v)} 
-                    unit="%"
-                    tooltip="Weighted Average Cost of Capital. The required rate of return."
-                  />
-                  <InputField 
-                    label="Terminal Growth" 
-                    value={inputs.terminalGrowth} 
-                    onChange={(v) => updateInput('terminalGrowth', v)} 
-                    unit="%"
-                    step="0.1"
-                    tooltip="Perpetual growth rate after year 10. Should be < GDP growth."
-                  />
-                </div>
-
-                <div className="grid grid-cols-2 gap-4">
-                  <InputField 
-                    label="Shares Outstanding" 
-                    value={inputs.sharesOutstanding} 
-                    onChange={(v) => updateInput('sharesOutstanding', v)} 
-                    tooltip="Total number of shares."
-                  />
-                  <InputField 
-                    label="Net Debt" 
-                    value={inputs.netDebt} 
-                    onChange={(v) => updateInput('netDebt', v)} 
-                    tooltip="Total Debt minus Cash & Equivalents."
-                  />
-                </div>
-              </div>
-            </div>
-
-            {/* Guide Card */}
-            <div className="bg-blue-50 rounded-xl p-5 border border-blue-100 text-sm text-blue-800">
-              <h3 className="font-semibold mb-2 flex items-center gap-2">
-                <Info size={16}/> Quick Tip
-              </h3>
-              <p className="opacity-80">
-                A higher WACC significantly lowers valuation. Most large cap stocks have a WACC between 7-10%.
-                Terminal growth should rarely exceed 3-4%.
-              </p>
-            </div>
-          </div>
-
-          {/* MIDDLE/RIGHT: Results & Analysis */}
-          <div className="lg:col-span-8 space-y-6">
+            const terminalValuePV = terminalValue / Math.pow(1 + waccDecimal, 10);
             
-            {/* Top Cards: Valuation Output */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {/* Standard DCF Result */}
-              <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6 flex flex-col justify-between relative overflow-hidden">
-                <div className="absolute top-0 right-0 p-4 opacity-10">
-                  <TrendingUp size={100} />
-                </div>
-                <div>
-                  <h3 className="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-1">Intrinsic Value</h3>
-                  <div className="text-4xl font-bold text-slate-900">
-                    ${result.sharePrice.toFixed(2)}
-                  </div>
-                  <div className={`text-sm font-medium mt-2 flex items-center gap-1 ${upside >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                    {upside >= 0 ? '+' : ''}{upside.toFixed(1)}% 
-                    <span className="text-slate-400 font-normal">vs Current Price</span>
-                  </div>
-                </div>
-                <div className="mt-6 pt-4 border-t border-slate-100 grid grid-cols-2 gap-4 text-sm">
-                  <div>
-                    <span className="block text-slate-400 text-xs">Equity Value</span>
-                    <span className="font-semibold text-slate-700">${(result.equityValue / 1000).toFixed(1)}B</span>
-                  </div>
-                  <div>
-                    <span className="block text-slate-400 text-xs">Enterprise Value</span>
-                    <span className="font-semibold text-slate-700">${(result.enterpriseValue / 1000).toFixed(1)}B</span>
-                  </div>
-                </div>
-              </div>
+            const enterpriseValue = sumPV + terminalValuePV;
+            const equityValue = enterpriseValue - netDebt;
+            const sharePrice = equityValue / sharesOutstanding;
 
-              {/* Reverse DCF Result */}
-              <div className="bg-slate-800 rounded-xl shadow-sm border border-slate-700 p-6 text-white relative overflow-hidden">
-                <div className="absolute top-0 right-0 p-4 opacity-10">
-                  <RefreshCw size={100} />
+            return {
+                sharePrice,
+                equityValue,
+                enterpriseValue,
+                terminalValuePV,
+                sumPV,
+                projectedFCF
+            };
+        };
+
+        const solveReverseDCF = (targetPrice, inputs) => {
+            let low = -0.50; // -50%
+            let high = 1.00; // 100%
+            let tolerance = 0.01;
+            let iterations = 0;
+            let impliedRate = 0;
+
+            while (iterations < 50) {
+                const mid = (low + high) / 2;
+                const testInputs = {
+                ...inputs,
+                growthRate1to5: mid * 100,
+                growthRate6to10: (mid * 100) * 0.75 
+                };
+
+                const result = calculateDCF(testInputs);
+                
+                if (Math.abs(result.sharePrice - targetPrice) < tolerance) {
+                impliedRate = mid * 100;
+                break;
+                }
+
+                if (result.sharePrice < targetPrice) {
+                low = mid;
+                } else {
+                high = mid;
+                }
+                impliedRate = mid * 100;
+                iterations++;
+            }
+            return impliedRate;
+        };
+
+        // --- Components ---
+
+        const InputField = ({ label, value, onChange, unit = '', step = '0.1', type = 'number', tooltip }) => (
+            <div className="mb-4">
+                <div className="flex justify-between items-end mb-1 min-h-[2rem]">
+                    <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider flex items-center gap-1 pb-0.5">
+                        {label}
+                        {tooltip && (
+                        <div className="group relative">
+                            <Info size={12} className="text-slate-400 cursor-help" />
+                            <div className="absolute left-0 bottom-full mb-2 hidden group-hover:block w-48 p-2 bg-slate-800 text-slate-100 text-xs rounded shadow-lg z-10">
+                            {tooltip}
+                            </div>
+                        </div>
+                        )}
+                    </label>
+                    <span className="text-xs font-medium text-slate-400 pb-0.5">{unit}</span>
                 </div>
-                <div>
-                  <h3 className="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-1">Reverse DCF Implied Growth</h3>
-                  <div className="text-4xl font-bold text-white">
-                    {impliedGrowth.toFixed(1)}%
-                  </div>
-                  <div className="text-sm font-medium mt-2 text-slate-400">
-                    Required annual growth (Y1-5) to justify ${currentPrice.toFixed(2)}
-                  </div>
+                <div className="relative">
+                <input
+                    type={type}
+                    step={step}
+                    value={value}
+                    onChange={(e) => onChange(parseFloat(e.target.value) || 0)}
+                    className="w-full bg-slate-50 border border-slate-200 text-slate-800 rounded px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all font-mono text-right"
+                />
                 </div>
-                <div className="mt-6 pt-4 border-t border-slate-700 text-sm text-slate-300">
-                  <p>
-                    If you believe {ticker} can grow faster than <strong>{impliedGrowth.toFixed(1)}%</strong> annually, the stock might be undervalued.
-                  </p>
-                </div>
-              </div>
             </div>
+        );
 
-            {/* Analysis Tabs */}
-            <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
-              <div className="border-b border-slate-200 flex">
-                <button 
-                  onClick={() => setActiveTab('dcf')}
-                  className={`px-6 py-3 text-sm font-semibold transition-colors ${activeTab === 'dcf' ? 'text-blue-600 border-b-2 border-blue-600 bg-blue-50/50' : 'text-slate-500 hover:text-slate-800'}`}
-                >
-                  Sensitivity Analysis
-                </button>
-                <button 
-                  onClick={() => setActiveTab('details')}
-                  className={`px-6 py-3 text-sm font-semibold transition-colors ${activeTab === 'details' ? 'text-blue-600 border-b-2 border-blue-600 bg-blue-50/50' : 'text-slate-500 hover:text-slate-800'}`}
-                >
-                  Projection Details
-                </button>
-              </div>
+        const SensitivityTable = ({ baseInputs, basePrice }) => {
+            const waccSteps = [-1, -0.5, 0, 0.5, 1];
+            const growthSteps = [-0.5, 0, 0.5];
 
-              <div className="p-6">
-                {activeTab === 'dcf' && (
-                  <div>
-                    <div className="flex justify-between items-center mb-4">
-                      <h3 className="font-bold text-slate-800">Sensitivity Matrix: Price per Share</h3>
-                      <span className="text-xs text-slate-500">Varying WACC and Terminal Growth</span>
-                    </div>
-                    <SensitivityTable 
-                      baseInputs={inputs} 
-                      basePrice={result.sharePrice}
-                    />
-                    <div className="mt-4 text-xs text-slate-400 italic">
-                      * Center cell represents your current input assumptions.
-                    </div>
-                  </div>
-                )}
+            return (
+                <div className="overflow-x-auto">
+                <table className="w-full text-sm text-center border-collapse">
+                    <thead>
+                    <tr>
+                        <th className="p-2 bg-slate-50 border border-slate-200 text-slate-400 text-xs font-normal">
+                        WACC (X) <br/> Term. G (Y)
+                        </th>
+                        {waccSteps.map((step) => (
+                        <th key={step} className="p-2 bg-slate-50 border border-slate-200 text-slate-600 font-medium">
+                            {(baseInputs.wacc + step).toFixed(1)}%
+                        </th>
+                        ))}
+                    </tr>
+                    </thead>
+                    <tbody>
+                    {growthSteps.map((gStep) => (
+                        <tr key={gStep}>
+                        <td className="p-2 bg-slate-50 border border-slate-200 text-slate-600 font-medium">
+                            {(baseInputs.terminalGrowth + gStep).toFixed(1)}%
+                        </td>
+                        {waccSteps.map((wStep) => {
+                            const inputs = {
+                            ...baseInputs,
+                            wacc: baseInputs.wacc + wStep,
+                            terminalGrowth: baseInputs.terminalGrowth + gStep
+                            };
+                            const { sharePrice } = calculateDCF(inputs);
+                            
+                            const diff = (sharePrice - basePrice) / basePrice;
+                            let bgClass = "bg-white";
+                            if (sharePrice > basePrice * 1.1) bgClass = "bg-green-50 text-green-700";
+                            else if (sharePrice < basePrice * 0.9) bgClass = "bg-red-50 text-red-700";
 
-                {activeTab === 'details' && (
-                  <div>
-                    <h3 className="font-bold text-slate-800 mb-4">Cash Flow Projections</h3>
-                    <div className="overflow-x-auto">
-                      <table className="w-full text-sm text-left">
-                        <thead>
-                          <tr className="border-b border-slate-200">
-                            <th className="py-2 font-medium text-slate-500">Year</th>
-                            <th className="py-2 font-medium text-slate-500 text-right">Projected FCF</th>
-                            <th className="py-2 font-medium text-slate-500 text-right">Discount Factor</th>
-                            <th className="py-2 font-medium text-slate-500 text-right">Present Value</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-100">
-                          {result.projectedFCF.map((row) => (
-                            <tr key={row.year} className={row.year === 5 || row.year === 10 ? 'bg-slate-50' : ''}>
-                              <td className="py-2 text-slate-800">Year {row.year}</td>
-                              <td className="py-2 text-right font-mono text-slate-600">{row.fcf.toLocaleString(undefined, { maximumFractionDigits: 0 })}</td>
-                              <td className="py-2 text-right font-mono text-slate-400">{(1 / Math.pow(1 + inputs.wacc/100, row.year)).toFixed(3)}</td>
-                              <td className="py-2 text-right font-mono font-medium text-slate-800">{row.pv.toLocaleString(undefined, { maximumFractionDigits: 0 })}</td>
-                            </tr>
-                          ))}
-                          <tr className="bg-blue-50">
-                            <td className="py-3 font-bold text-blue-800">Terminal Value</td>
-                            <td className="py-3 text-right font-mono text-blue-800" colSpan="2">
-                              {/* TV before Discounting */}
-                              {((result.projectedFCF[9].fcf * (1 + inputs.terminalGrowth/100)) / (inputs.wacc/100 - inputs.terminalGrowth/100)).toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                            return (
+                            <td key={wStep} className={`p-2 border border-slate-200 font-mono ${bgClass}`}>
+                                ${sharePrice.toFixed(2)}
                             </td>
-                            <td className="py-3 text-right font-mono font-bold text-blue-800">
-                              {result.terminalValuePV.toLocaleString(undefined, { maximumFractionDigits: 0 })}
-                            </td>
-                          </tr>
-                        </tbody>
-                      </table>
+                            );
+                        })}
+                        </tr>
+                    ))}
+                    </tbody>
+                </table>
+                </div>
+            );
+        };
+
+        function App() {
+            const [activeTab, setActiveTab] = useState('dcf');
+            
+            const [ticker, setTicker] = useState('AAPL');
+            const [currentPrice, setCurrentPrice] = useState(220.00);
+            
+            const [inputs, setInputs] = useState({
+                fcf: 100000, 
+                growthRate1to5: 12.0,
+                growthRate6to10: 6.0,
+                wacc: 9.0,
+                terminalGrowth: 3.0,
+                sharesOutstanding: 15500,
+                netDebt: 50000,
+            });
+
+            const result = useMemo(() => calculateDCF(inputs), [inputs]);
+            const upside = ((result.sharePrice - currentPrice) / currentPrice) * 100;
+            const impliedGrowth = useMemo(() => solveReverseDCF(currentPrice, inputs), [currentPrice, inputs]);
+
+            const updateInput = (key, value) => {
+                setInputs(prev => ({ ...prev, [key]: value }));
+            };
+
+            return (
+                <div className="min-h-screen bg-slate-100 text-slate-800 font-sans p-4 md:p-8">
+                <div className="max-w-6xl mx-auto">
+                    
+                    {/* Header */}
+                    <header className="flex flex-col md:flex-row justify-between items-start md:items-center mb-8 gap-4">
+                    <div>
+                        <h1 className="text-3xl font-bold text-slate-900 tracking-tight flex items-center gap-2">
+                        <Activity className="text-blue-600" />
+                        Valuation Lab
+                        </h1>
+                        <p className="text-slate-500 text-sm mt-1">Advanced DCF & Reverse DCF Modeling</p>
                     </div>
-                    <div className="mt-4 grid grid-cols-2 gap-4 text-xs text-slate-500 bg-slate-50 p-3 rounded">
-                      <div>Sum of PV (10yr): <span className="font-mono text-slate-800">{result.sumPV.toLocaleString()}</span></div>
-                      <div>PV of Terminal Value: <span className="font-mono text-slate-800">{result.terminalValuePV.toLocaleString()}</span></div>
+                    <div className="flex items-center gap-4 bg-white p-2 rounded-lg shadow-sm border border-slate-200">
+                        <div className="px-3">
+                        <label className="text-xs text-slate-400 block font-bold">TICKER</label>
+                        <input 
+                            value={ticker} 
+                            onChange={(e) => setTicker(e.target.value.toUpperCase())}
+                            className="font-bold text-slate-800 w-16 outline-none bg-transparent"
+                        />
+                        </div>
+                        <div className="h-8 w-px bg-slate-200"></div>
+                        <div className="px-3">
+                        <label className="text-xs text-slate-400 block font-bold">CURRENT PRICE</label>
+                        <div className="flex items-center gap-1">
+                            <span className="text-slate-400">$</span>
+                            <input 
+                            type="number" 
+                            value={currentPrice} 
+                            onChange={(e) => setCurrentPrice(parseFloat(e.target.value))}
+                            className="font-bold text-slate-800 w-20 outline-none bg-transparent"
+                            />
+                        </div>
+                        </div>
                     </div>
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
+                    </header>
+
+                    {/* Main Grid */}
+                    <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+                    
+                    {/* LEFT COLUMN: Inputs */}
+                    <div className="lg:col-span-4 space-y-6">
+                        <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6">
+                        <h2 className="text-lg font-bold text-slate-800 mb-4 flex items-center gap-2">
+                            <Calculator size={18} />
+                            Model Assumptions
+                        </h2>
+                        
+                        <div className="space-y-1">
+                            <InputField 
+                            label="Free Cash Flow (TTM)" 
+                            value={inputs.fcf} 
+                            onChange={(v) => updateInput('fcf', v)} 
+                            tooltip="Total free cash flow generated in the last 12 months. Base for projection."
+                            />
+                            
+                            <div className="grid grid-cols-2 gap-4">
+                            <InputField 
+                                label="Growth Rate (Y 1-5)" 
+                                value={inputs.growthRate1to5} 
+                                onChange={(v) => updateInput('growthRate1to5', v)} 
+                                unit="%" 
+                            />
+                            <InputField 
+                                label="Growth Rate (Y 6-10)" 
+                                value={inputs.growthRate6to10} 
+                                onChange={(v) => updateInput('growthRate6to10', v)} 
+                                unit="%" 
+                            />
+                            </div>
+
+                            <div className="p-4 bg-slate-50 rounded-lg border border-slate-100 mb-4">
+                            <InputField 
+                                label="Discount Rate (WACC)" 
+                                value={inputs.wacc} 
+                                onChange={(v) => updateInput('wacc', v)} 
+                                unit="%"
+                                tooltip="Weighted Average Cost of Capital. The required rate of return."
+                            />
+                            <InputField 
+                                label="Terminal Growth" 
+                                value={inputs.terminalGrowth} 
+                                onChange={(v) => updateInput('terminalGrowth', v)} 
+                                unit="%"
+                                step="0.1"
+                                tooltip="Perpetual growth rate after year 10. Should be < GDP growth."
+                            />
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-4">
+                            <InputField 
+                                label="Shares Outstanding" 
+                                value={inputs.sharesOutstanding} 
+                                onChange={(v) => updateInput('sharesOutstanding', v)} 
+                                tooltip="Total number of shares."
+                            />
+                            <InputField 
+                                label="Net Debt" 
+                                value={inputs.netDebt} 
+                                onChange={(v) => updateInput('netDebt', v)} 
+                                tooltip="Total Debt minus Cash & Equivalents."
+                            />
+                            </div>
+                        </div>
+                        </div>
+
+                        {/* Guide Card */}
+                        <div className="bg-blue-50 rounded-xl p-5 border border-blue-100 text-sm text-blue-800">
+                        <h3 className="font-semibold mb-2 flex items-center gap-2">
+                            <Info size={16}/> Quick Tip
+                        </h3>
+                        <p className="opacity-80">
+                            A higher WACC significantly lowers valuation. Most large cap stocks have a WACC between 7-10%.
+                            Terminal growth should rarely exceed 3-4%.
+                        </p>
+                        </div>
+                    </div>
+
+                    {/* MIDDLE/RIGHT: Results & Analysis */}
+                    <div className="lg:col-span-8 space-y-6">
+                        
+                        {/* Top Cards: Valuation Output */}
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        {/* Standard DCF Result */}
+                        <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6 flex flex-col justify-between relative overflow-hidden">
+                            <div className="absolute top-0 right-0 p-4 opacity-10">
+                            <TrendingUp size={100} />
+                            </div>
+                            <div>
+                            <h3 className="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-1">Intrinsic Value</h3>
+                            <div className="text-4xl font-bold text-slate-900">
+                                ${result.sharePrice.toFixed(2)}
+                            </div>
+                            <div className={`text-sm font-medium mt-2 flex items-center gap-1 ${upside >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                                {upside >= 0 ? '+' : ''}{upside.toFixed(1)}% 
+                                <span className="text-slate-400 font-normal">vs Current Price</span>
+                            </div>
+                            </div>
+                            <div className="mt-6 pt-4 border-t border-slate-100 grid grid-cols-2 gap-4 text-sm">
+                            <div>
+                                <span className="block text-slate-400 text-xs">Equity Value</span>
+                                <span className="font-semibold text-slate-700">${(result.equityValue / 1000).toFixed(1)}B</span>
+                            </div>
+                            <div>
+                                <span className="block text-slate-400 text-xs">Enterprise Value</span>
+                                <span className="font-semibold text-slate-700">${(result.enterpriseValue / 1000).toFixed(1)}B</span>
+                            </div>
+                            </div>
+                        </div>
+
+                        {/* Reverse DCF Result */}
+                        <div className="bg-slate-800 rounded-xl shadow-sm border border-slate-700 p-6 text-white relative overflow-hidden">
+                            <div className="absolute top-0 right-0 p-4 opacity-10">
+                            <RefreshCw size={100} />
+                            </div>
+                            <div>
+                            <h3 className="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-1">Reverse DCF Implied Growth</h3>
+                            <div className="text-4xl font-bold text-white">
+                                {impliedGrowth.toFixed(1)}%
+                            </div>
+                            <div className="text-sm font-medium mt-2 text-slate-400">
+                                Required annual growth (Y1-5) to justify ${currentPrice.toFixed(2)}
+                            </div>
+                            </div>
+                            <div className="mt-6 pt-4 border-t border-slate-700 text-sm text-slate-300">
+                            <p>
+                                If you believe {ticker} can grow faster than <strong>{impliedGrowth.toFixed(1)}%</strong> annually, the stock might be undervalued.
+                            </p>
+                            </div>
+                        </div>
+                        </div>
+
+                        {/* Analysis Tabs */}
+                        <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+                        <div className="border-b border-slate-200 flex">
+                            <button 
+                            onClick={() => setActiveTab('dcf')}
+                            className={`px-6 py-3 text-sm font-semibold transition-colors ${activeTab === 'dcf' ? 'text-blue-600 border-b-2 border-blue-600 bg-blue-50/50' : 'text-slate-500 hover:text-slate-800'}`}
+                            >
+                            Sensitivity Analysis
+                            </button>
+                            <button 
+                            onClick={() => setActiveTab('details')}
+                            className={`px-6 py-3 text-sm font-semibold transition-colors ${activeTab === 'details' ? 'text-blue-600 border-b-2 border-blue-600 bg-blue-50/50' : 'text-slate-500 hover:text-slate-800'}`}
+                            >
+                            Projection Details
+                            </button>
+                        </div>
+
+                        <div className="p-6">
+                            {activeTab === 'dcf' && (
+                            <div>
+                                <div className="flex justify-between items-center mb-4">
+                                <h3 className="font-bold text-slate-800">Sensitivity Matrix: Price per Share</h3>
+                                <span className="text-xs text-slate-500">Varying WACC and Terminal Growth</span>
+                                </div>
+                                <SensitivityTable 
+                                baseInputs={inputs} 
+                                basePrice={result.sharePrice}
+                                />
+                                <div className="mt-4 text-xs text-slate-400 italic">
+                                * Center cell represents your current input assumptions.
+                                </div>
+                            </div>
+                            )}
+
+                            {activeTab === 'details' && (
+                            <div>
+                                <h3 className="font-bold text-slate-800 mb-4">Cash Flow Projections</h3>
+                                <div className="overflow-x-auto">
+                                <table className="w-full text-sm text-left">
+                                    <thead>
+                                    <tr className="border-b border-slate-200">
+                                        <th className="py-2 font-medium text-slate-500">Year</th>
+                                        <th className="py-2 font-medium text-slate-500 text-right">Projected FCF</th>
+                                        <th className="py-2 font-medium text-slate-500 text-right">Discount Factor</th>
+                                        <th className="py-2 font-medium text-slate-500 text-right">Present Value</th>
+                                    </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-slate-100">
+                                    {result.projectedFCF.map((row) => (
+                                        <tr key={row.year} className={row.year === 5 || row.year === 10 ? 'bg-slate-50' : ''}>
+                                        <td className="py-2 text-slate-800">Year {row.year}</td>
+                                        <td className="py-2 text-right font-mono text-slate-600">{row.fcf.toLocaleString(undefined, { maximumFractionDigits: 0 })}</td>
+                                        <td className="py-2 text-right font-mono text-slate-400">{(1 / Math.pow(1 + inputs.wacc/100, row.year)).toFixed(3)}</td>
+                                        <td className="py-2 text-right font-mono font-medium text-slate-800">{row.pv.toLocaleString(undefined, { maximumFractionDigits: 0 })}</td>
+                                        </tr>
+                                    ))}
+                                    <tr className="bg-blue-50">
+                                        <td className="py-3 font-bold text-blue-800">Terminal Value</td>
+                                        <td className="py-3 text-right font-mono text-blue-800" colSpan="2">
+                                        {/* TV before Discounting */}
+                                        {((result.projectedFCF[9].fcf * (1 + inputs.terminalGrowth/100)) / (inputs.wacc/100 - inputs.terminalGrowth/100)).toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                                        </td>
+                                        <td className="py-3 text-right font-mono font-bold text-blue-800">
+                                        {result.terminalValuePV.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                                        </td>
+                                    </tr>
+                                    </tbody>
+                                </table>
+                                </div>
+                                <div className="mt-4 grid grid-cols-2 gap-4 text-xs text-slate-500 bg-slate-50 p-3 rounded">
+                                <div>Sum of PV (10yr): <span className="font-mono text-slate-800">{result.sumPV.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span></div>
+                                <div>PV of Terminal Value: <span className="font-mono text-slate-800">{result.terminalValuePV.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span></div>
+                                </div>
+                            </div>
+                            )}
+                        </div>
+                        </div>
+                    </div>
+                    </div>
+                </div>
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
